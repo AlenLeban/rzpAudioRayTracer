@@ -1,0 +1,45 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+float Resolution;
+
+float randomValue(inout uint state)
+{
+    state *= (state + 195439) * (state + 124395) * (state + 845921);
+    return state / 4294967295.0;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    int pixelIndex = id.x + id.y * Resolution;
+    float rnd = randomValue(pixelIndex);
+    Result[id.xy] = float4(rnd, rnd, rnd, 1.0);
+    /*float zr = 0;
+    float zi = 0;
+    float a = (id.x / Resolution - 0.5f)*3.0f;
+    float b = (id.y / Resolution - 0.5f)*3.0f;
+    bool diverged = false;
+    for (int i = 0; i < 100; i++)
+    {
+        float newzr = zr * zr - zi * zi + a;
+        zi = 2 * zr * zi + b;
+        zr = newzr;
+        if (zr * zr + zi * zi >= 1)
+        {
+            diverged = true;
+            break;
+        }
+    }
+    if (diverged)
+    {
+        Result[id.xy] = float4(a, b, 0, 1.0);
+    }
+    else
+    {
+        Result[id.xy] = float4(0, 0, 0, 1.0);
+    }*/
+}

@@ -1,0 +1,20 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+struct Cube
+{
+    float3 position;
+    float4 color;
+};
+
+RWStructuredBuffer<Cube> cubes;
+float Resolution;
+
+[numthreads(10,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float xPos = id.x / Resolution;
+    Cube cube = cubes[id.x];
+    cube.color = float4(1.0, 0.0, 0.0, 1.0);
+    cubes[id.x] = cube;
+}

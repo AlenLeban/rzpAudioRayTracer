@@ -1,0 +1,701 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+static const float PI = 3.14159265f;
+static const int NUM_BANDS = 2;
+
+// hit object type
+// 0 = box
+// 1 = cylinder
+
+struct FAudioSource
+{
+    int id;
+    float3 location;
+};
+
+struct FRay
+{
+    uint debugId;
+    float3 origin;
+    float3 direction;
+    float pressure0;
+    float pressure1;
+    float pressure2;
+    float pressure3;
+    float distance;
+    float totalDistance;
+};
+
+struct FHitInfo
+{
+    uint wasHit;
+    float3 hitLocation;
+    float3 hitNormal;
+    uint hitObjectId;
+    uint hitObjectType;
+};
+
+
+struct FSurfaceProperties
+{
+    float nonAbsorption0;
+    float nonAbsorption1;
+    float nonAbsorption2;
+    float nonAbsorption3;
+    float roughness;
+    float speedOfSound;
+    uint isDiffractionVolume;
+};
+
+struct FBox
+{
+    float3 minPoint;
+    float3 maxPoint;
+    FSurfaceProperties properties;
+    float4x4 localToWorldMatrix;
+    float4x4 worldToLocalMatrix;
+};
+
+struct FCylinder
+{
+    float3 a;
+    float3 b;
+    float radius;
+};
+
+float Angle;
+
+uint useDiffraction = 0;
+uint MaxBounces;
+uint Time;
+uint rayIndex = 0;
+uint DrawAllRays = 1;
+uint NumRays = 40;
+uint maxRays = 50;
+uint threadStartIndex = 0;
+FSurfaceProperties currentMedium;
+float4 ListenerPosition;
+StructuredBuffer<FAudioSource> AudioSources;
+StructuredBuffer<FBox> BoxCollisions;
+StructuredBuffer<FCylinder> CylinderCollisions;
+RWStructuredBuffer<FRay> GeneratedRays;
+RWStructuredBuffer<FHitInfo> FinalHits;
+
+void SaveHitAndRay(FHitInfo hit, FRay ray)
+{
+    if (rayIndex == maxRays)
+    {
+        return; 
+    }
+    FinalHits[threadStartIndex + rayIndex] = hit;
+    GeneratedRays[threadStartIndex + rayIndex] = ray;
+    rayIndex++;
+}
+
+float3 GetRefractionVector(float3 n, float3 i, float ior)
+{
+    float cosTheta = -dot(n, i);
+    return ior * i + (ior * cosTheta - sqrt(1 - ior * ior * (1 - cosTheta * cosTheta))) * n;
+}
+
+float GetRandomValue(inout uint state)
+{
+    state *= (state + 195439) * (state + 124395) * (state + 845921);
+    return state / 4294967295.0;
+}
+
+float3 GetRandomVectorOnHemisphere(float3 normal, inout uint state)
+{
+    float u = GetRandomValue(state);
+    float v = GetRandomValue(state);
+
+    float theta = 2.0 * PI * u;
+    float phi = acos(v); 
+
+    float x = sin(phi) * cos(theta);
+    float y = sin(phi) * sin(theta);
+    float z = cos(phi);
+
+    float3 tangent = normalize(any(normalize(cross(normal, float3(0, 1, 0))))
+        ? cross(normal, float3(0, 1, 0))
+        : cross(normal, float3(1, 0, 0)));
+    float3 bitangent = cross(normal, tangent);
+
+    float3 dir = x * tangent + y * bitangent + z * normal;
+    return normalize(dir);
+}
+
+float3 GetRandomPointOnUnitSphere(inout uint state)
+{
+    float u = GetRandomValue(state);
+    float v = GetRandomValue(state);
+    float theta = 2 * PI * u;
+    float phi = acos(2 * v - 1);
+    float x = sin(phi) * cos(theta);
+    float y = sin(phi) * sin(theta);
+    float z = cos(phi);
+    return float3(x, y, z);
+}
+
+
+FRay GenerateRandomRayFromAudioSource(FAudioSource audioSource, inout uint state)
+{
+    FRay ray = { 0, audioSource.location, GetRandomPointOnUnitSphere(state), 
+        0.25f, 
+        0.25f, 
+        0.25f, 
+        0.25f, 
+    0.0f, 0.0f };
+    return ray;
+}
+
+FRay GetReflectionRayFromHit(FHitInfo hitInfo, FRay hitRay, float scattering, inout int state)
+{
+    FRay reflectionRay = hitRay;
+    reflectionRay.distance = 0;
+    reflectionRay.direction = reflect(hitRay.direction, hitInfo.hitNormal) * (1-scattering) + GetRandomVectorOnHemisphere(hitInfo.hitNormal, state) * scattering;
+    reflectionRay.origin = hitInfo.hitLocation + hitInfo.hitNormal * 0.0001f;
+    return reflectionRay;
+}
+
+FRay GetRefractionRayFromHit(FHitInfo hitInfo, FRay hitRay)
+{
+    FRay refractionRay = hitRay;
+    FSurfaceProperties fromMedium = currentMedium;
+    FSurfaceProperties toMedium = BoxCollisions[hitInfo.hitObjectId].properties;
+    float ior = fromMedium.speedOfSound / toMedium.speedOfSound;
+    refractionRay.direction = refract(hitRay.direction, hitInfo.hitNormal, ior);
+    refractionRay.origin = hitInfo.hitLocation + refractionRay.direction * 0.0001f;
+    return refractionRay;
+    //refractionRay.origin = hitInfo.hitLocation
+}
+
+float3 GetNormalOnBoxAtPoint(FBox box, float3 location)
+{
+    
+    if (abs(location.x - box.maxPoint.x) < 0.001f)
+    {
+        return float3(1.0, 0.0, 0.0);
+    }
+    else if (abs(location.x - box.minPoint.x) < 0.001f)
+    {
+        return float3(-1.0, 0.0, 0.0);
+    }
+    else if (abs(location.y - box.maxPoint.y) < 0.001f)
+    {
+        return float3(0.0, 1.0, 0.0);
+    }
+    else if (abs(location.y - box.minPoint.y) < 0.001f)
+    {
+        return float3(0.0, -1.0, 0.0);
+    }
+    else if (abs(location.z - box.maxPoint.z) < 0.001f)
+    {
+        return float3(0.0, 0.0, 1.0);
+    }
+    else if (abs(location.z - box.minPoint.z) < 0.001f)
+    {
+        return float3(0.0, 0.0, -1.0);
+    }
+    return float3(0.0, 0.0, 0.0);
+}
+
+
+// cylinder defined by extremes a and b, and radious ra
+FHitInfo GetRayCylinderIntersection(FRay ray, FCylinder cylinder)
+{
+    FHitInfo outInfo;
+    outInfo.wasHit = false;
+    outInfo.hitObjectType = 1;
+    outInfo.hitLocation = float3(0, 0, 0);
+    outInfo.hitNormal = float3(0, 0, 0);
+    float3 ba = cylinder.b - cylinder.a;
+    float3 oc = ray.origin - cylinder.a;
+    float baba = dot(ba, ba);
+    float bard = dot(ba, ray.direction);
+    float baoc = dot(ba, oc);
+    float k2 = baba - bard * bard;
+    float k1 = baba * dot(oc, ray.direction) - baoc * bard;
+    float k0 = baba * dot(oc, oc) - baoc * baoc - cylinder.radius * cylinder.radius * baba;
+    float h = k1 * k1 - k2 * k0;
+    if (h < 0.0)
+        return outInfo; //no intersection
+    h = sqrt(h);
+    float t = (-k1 - h) / k2;
+    // body
+    float y = baoc + t * bard;
+    if (y > 0.0 && y < baba)
+    {
+        outInfo.hitNormal = (oc + t * ray.direction - ba * y / baba) / cylinder.radius;
+        outInfo.hitLocation = ray.origin + ray.direction * t - outInfo.hitNormal * cylinder.radius;
+        outInfo.wasHit = true;
+        return outInfo;
+    }
+        
+    // caps
+    t = (((y < 0.0) ? 0.0 : baba) - baoc) / bard;
+    if (abs(k1 + k2 * t) < h)
+    {
+        outInfo.hitNormal = ba * sign(y) / sqrt(baba);
+        outInfo.hitLocation = ray.origin + ray.direction * t;
+        outInfo.wasHit = true;
+        return outInfo;
+    }
+    return outInfo; //no intersection
+}
+
+FHitInfo GetRayBoxIntersection(FRay ray, FBox box)
+{
+    FRay localRay = ray;
+    localRay.origin = mul(box.worldToLocalMatrix, float4(localRay.origin, 1.0f)).xyz;
+    float3x3 R = (float3x3) box.worldToLocalMatrix;
+    localRay.direction = normalize(mul(R, ray.direction));
+    FHitInfo outInfo;
+    outInfo.hitObjectType = 0;
+    float3 tLow = (box.minPoint - localRay.origin) / localRay.direction;
+    float3 tHigh = (box.maxPoint - localRay.origin) / localRay.direction;
+    float3 tClose3 = min(tLow, tHigh);
+    float3 tFar3 = max(tLow, tHigh);
+    float tClose = max(max(tClose3.x, tClose3.y), tClose3.z);
+    float tFar = min(min(tFar3.x, tFar3.y), tFar3.z);
+    outInfo.wasHit = tClose <= tFar && (tClose >= 0 || tFar >= 0);
+    
+    if (tClose > 0)
+    {
+        outInfo.hitLocation = localRay.origin + localRay.direction * tClose;
+        outInfo.hitNormal = GetNormalOnBoxAtPoint(box, outInfo.hitLocation);
+        outInfo.hitLocation = mul(box.localToWorldMatrix, float4(outInfo.hitLocation, 1.0f)).xyz;
+        float3x3 N = ((float3x3) box.localToWorldMatrix);
+        outInfo.hitNormal = normalize(mul(N, outInfo.hitNormal));
+    }
+    else if (tFar > 0)
+    {
+        outInfo.hitLocation = localRay.origin + localRay.direction * tFar;
+        outInfo.hitNormal = GetNormalOnBoxAtPoint(box, outInfo.hitLocation);
+        outInfo.hitLocation = mul(box.localToWorldMatrix, float4(outInfo.hitLocation, 1.0f)).xyz;
+        float3x3 N = ((float3x3) box.localToWorldMatrix);
+        outInfo.hitNormal = normalize(mul(N, outInfo.hitNormal));
+    }
+    return outInfo;
+}
+
+
+
+void CastRayIntoScene(inout FRay ray, inout FHitInfo closestHit, float maxDistance=-1, bool ignoreDiffraction=true)
+{
+    uint numBoxes;
+    uint numCylinders;
+    uint numSources;
+    uint strideBox;
+    uint strideCylinder;
+    BoxCollisions.GetDimensions(numBoxes, strideBox);
+    CylinderCollisions.GetDimensions(numCylinders, strideCylinder);
+    closestHit.wasHit = false;
+    float closestHitDistance = maxDistance == -1 ? 99999999 : maxDistance;
+    
+    // cylinder diffraction volumes
+    if (!ignoreDiffraction)
+    {
+        for (int i = 0; i < numCylinders; i++)
+        {
+            FHitInfo hit = GetRayCylinderIntersection(ray, CylinderCollisions[i]);
+        
+            hit.hitObjectId = i;
+            if (!hit.wasHit)
+            {
+                continue;
+            }
+            
+            float hitDistance = length(hit.hitLocation - ray.origin);
+            if (hitDistance < 10) // if there was another diffraction volume hit too close, skip it
+            {
+                continue;
+            }
+            if ((hitDistance < closestHitDistance) && (maxDistance == -1 || hitDistance < maxDistance))
+            {
+                closestHit = hit;
+                closestHitDistance = hitDistance;
+            }
+        }
+    }
+    
+    for (int i = 0; i < numBoxes; i++)
+    {
+        if (BoxCollisions[i].properties.isDiffractionVolume == 1 && ignoreDiffraction)
+        {
+            continue;
+        }
+        FHitInfo hit = GetRayBoxIntersection(ray, BoxCollisions[i]);
+        hit.hitObjectId = i;
+        if (!hit.wasHit)
+        {
+            continue;
+        }
+        float hitDistance = length(hit.hitLocation - ray.origin);
+        if (hitDistance < 3 && BoxCollisions[i].properties.isDiffractionVolume == 1) // if there was another diffraction volume hit too close, skip it
+        {
+            continue;
+        }
+        if ((hitDistance < closestHitDistance) && (maxDistance == -1 || hitDistance < maxDistance))
+        {
+            closestHit = hit;
+            closestHitDistance = hitDistance;
+        }
+    }
+    ray.distance = closestHitDistance;
+    ray.totalDistance += closestHitDistance;
+}
+
+void ApplySurfacePropertiesToRay(inout FRay ray, FHitInfo hitInfo)
+{
+    float lambertFactor = max(-dot(hitInfo.hitNormal, ray.direction), 0);
+    ray.pressure0 *= BoxCollisions[hitInfo.hitObjectId].properties.nonAbsorption0; // TODO: different absorption based on frequency band
+    ray.pressure1 *= BoxCollisions[hitInfo.hitObjectId].properties.nonAbsorption1; // TODO: different absorption based on frequency band
+    ray.pressure2 *= BoxCollisions[hitInfo.hitObjectId].properties.nonAbsorption2; // TODO: different absorption based on frequency band
+    ray.pressure3 *= BoxCollisions[hitInfo.hitObjectId].properties.nonAbsorption3; // TODO: different absorption based on frequency band
+    
+    ray.pressure0 *= lambertFactor;
+    ray.pressure1 *= lambertFactor;
+    ray.pressure2 *= lambertFactor;
+    ray.pressure3 *= lambertFactor;
+
+}
+
+void ApplyTravellingMediumPropertiesToRay(inout FRay ray)
+{
+    ray.pressure0 *= 1;
+    ray.pressure1 *= exp(-0.0003454f * ray.distance);
+    ray.pressure2 *= exp(-0.0005758f * ray.distance);
+    ray.pressure3 *= exp(-0.0034598f * ray.distance);
+    //ray.pressure *= exp(-0.0015f * ray.distance); // air absorption
+    //ray.pressure /= d;
+    // TODO: different absorption of frequencies
+}
+void AttenuateRayByDiffraction(inout FRay diffractionRay, in FRay previousRay, in float3 diffractionHitNormal)
+{
+    float alignment = 150;
+    
+    float3 alignPlaneNormal = normalize(cross(cross(float3(0.0f, 1.0f, 0.0f), previousRay.direction), previousRay.direction));
+    float alignFactor = pow(min(max(0.0f, length(diffractionRay.direction - dot(alignPlaneNormal, normalize(diffractionRay.direction)) * alignPlaneNormal)), 1.0f), alignment);
+    float dott = dot(previousRay.direction, diffractionRay.direction);
+    //float dott = dot(float3(0.0f, 0.0f, 1.0f), diffractionRay.direction);
+    //float dott = 1.0f;
+    float v = sqrt(max(0, 1 - dott * dott));
+    //float v = atan2(length(cross(previousRay.direction, diffractionRay.direction)), dott)*180/3.141592654f;
+    //float v = Angle;
+    //float v = Angle;
+    //float v = acos(dott);
+    //float v = 1;
+    float v1 = v * sqrt(2*125.0f / 1000.0f);
+    float v2 = v * sqrt(2*500.0f / 1000.0f);
+    float v3 = v * sqrt(2*1000.0f / 1000.0f);
+    float v4 = v * sqrt(2*4000.0f / 1000.0f);
+    
+    float normalizeFactor = 0.23215f;
+    //float v1 = v * pow(125.0f / 1000.0f, 0.25f);
+    //float v2 = v * pow(500.0f / 1000.0f, 0.25f);
+    //float v3 = v * pow(1000.0f / 1000.0f, 0.25f);
+    //float v4 = v * pow(4000.0f / 1000.0f, 0.25f);
+    
+    //float factor1 = min(pow(sqrt((v1 - 0.1f) * (v1 - 0.1f) + 1) + v1 - 0.1, -1), 1.0f);
+    //float factor2 = min(pow(sqrt((v2 - 0.1f) * (v2 - 0.1f) + 1) + v2 - 0.1, -1), 1.0f);
+    //float factor3 = min(pow(sqrt((v3 - 0.1f) * (v3 - 0.1f) + 1) + v3 - 0.1, -1), 1.0f);
+    //float factor4 = min(pow(sqrt((v4 - 0.1f) * (v4 - 0.1f) + 1) + v4 - 0.1, -1), 1.0f);
+    
+    //diffractionRay.pressure0 *= v;
+    //diffractionRay.pressure1 *= v;
+    //diffractionRay.pressure2 *= v;
+    //diffractionRay.pressure3 *= v;
+    //return;
+    
+    float factor1 = min(pow(sqrt(v1 * v1 + 1) + v1, -1), 1.0f) * normalizeFactor;
+    float factor2 = min(pow(sqrt(v2 * v2 + 1) + v2, -1), 1.0f) * normalizeFactor;
+    float factor3 = min(pow(sqrt(v3 * v3 + 1) + v3, -1), 1.0f) * normalizeFactor;
+    float factor4 = min(pow(sqrt(v4 * v4 + 1) + v4, -1), 1.0f) * normalizeFactor;
+    
+    diffractionRay.pressure0 *= factor1 * alignFactor;
+    diffractionRay.pressure1 *= factor2 * alignFactor * 1.050f;
+    diffractionRay.pressure2 *= factor3 * alignFactor * 1.093f;
+    diffractionRay.pressure3 *= factor4 * alignFactor * 1.243f;
+}
+
+FRay GetDiffractionRayFromHit(FHitInfo hitInfo, FRay hitRay, inout int state)
+{
+    FRay diffractionRay = hitRay;
+    float randomDiffractionIndex = GetRandomValue(state)*0.9f + 0.1f;
+    diffractionRay.direction = refract(hitRay.direction, hitInfo.hitNormal, randomDiffractionIndex);
+    
+    AttenuateRayByDiffraction(diffractionRay, hitRay, hitInfo.hitNormal);
+    
+    diffractionRay.origin = hitInfo.hitLocation - hitInfo.hitNormal * 0.001f;
+    currentMedium = BoxCollisions[hitInfo.hitObjectId].properties;
+    return diffractionRay;
+}
+
+// Shoots a ray towards the listener
+void CheckListenerFromHit(FHitInfo hitInfo, FRay locationHitRay, int idx, int bounceIndex)
+{
+    float3 toListenerVector = ListenerPosition.xyz - hitInfo.hitLocation;
+    float distanceToListener = length(toListenerVector);
+    FRay listenerRay = locationHitRay;
+    listenerRay.debugId = 1;
+    listenerRay.origin = hitInfo.hitLocation + hitInfo.hitNormal * 0.00001f;
+    listenerRay.direction = toListenerVector / distanceToListener;
+    float cosFactor = max(dot(listenerRay.direction, hitInfo.hitNormal), 0);
+    FHitInfo listenerHitInfo;
+    FSurfaceProperties hitSurfaceProperties = BoxCollisions[hitInfo.hitObjectId].properties;
+    float3 specularReflectionDir = reflect(locationHitRay.direction, hitInfo.hitNormal);
+    float reflectionFactor = pow(max(dot(specularReflectionDir, listenerRay.direction), 0), (1 - hitSurfaceProperties.roughness) / (hitSurfaceProperties.roughness + 0.001f));
+    if (reflectionFactor != reflectionFactor)
+    {
+        reflectionFactor = 1;
+    }
+    CastRayIntoScene(listenerRay, listenerHitInfo, distanceToListener);
+    if (listenerHitInfo.wasHit == 0) // if the ray didnt hit anything between the source and the listener
+    {
+        listenerRay.pressure0 *= reflectionFactor;
+        listenerRay.pressure1 *= reflectionFactor;
+        listenerRay.pressure2 *= reflectionFactor;
+        listenerRay.pressure3 *= reflectionFactor;
+        listenerRay.distance = distanceToListener;
+        //listenerRay.pressure *= cosFactor;
+        ApplyTravellingMediumPropertiesToRay(listenerRay);
+        // ray ended close enough to the listener to count as non obstructed
+        // setting a few values for debugging purposes (for drawing the rays in the viewport)
+        listenerHitInfo.wasHit = 1;
+        listenerHitInfo.hitLocation = ListenerPosition;
+    }
+    else
+    {
+        listenerHitInfo.wasHit = 0;
+    }
+    SaveHitAndRay(listenerHitInfo, listenerRay);
+}
+
+// Shoots a ray towards the listener
+void CheckListenerFromPoint(float3 location, FRay locationHitRay)
+{
+    float3 toListenerVector = ListenerPosition.xyz - location;
+    float distanceToListener = length(toListenerVector);
+    FRay listenerRay = locationHitRay;
+    listenerRay.debugId = 1;
+    listenerRay.origin = location;
+    listenerRay.direction = toListenerVector / distanceToListener;
+    FHitInfo listenerHitInfo;
+    CastRayIntoScene(listenerRay, listenerHitInfo, distanceToListener);
+    if (listenerHitInfo.wasHit == 0) // if the ray didnt hit anything between the source and the listener
+    {
+        listenerRay.distance = distanceToListener;
+        //listenerRay.pressure *= cosFactor;
+        ApplyTravellingMediumPropertiesToRay(listenerRay);
+        // ray ended close enough to the listener to count as non obstructed
+        // setting a few values for debugging purposes (for drawing the rays in the viewport)
+        listenerHitInfo.wasHit = 1;
+        listenerHitInfo.hitLocation = ListenerPosition;
+    }
+    else
+    {
+        listenerHitInfo.wasHit = 0;
+    }
+    SaveHitAndRay(listenerHitInfo, listenerRay);
+}
+
+// Shoots a ray towards the listener
+void CheckListenerFromDiffraction(FRay originalRay, float3 hitLocation, float3 diffractionHitNormal)
+{
+    float3 toListenerVector = ListenerPosition.xyz - hitLocation;
+    float distanceToListener = length(toListenerVector);
+    FRay listenerRay = originalRay;
+    listenerRay.origin = hitLocation;
+    listenerRay.debugId = 1;
+    listenerRay.direction = toListenerVector / distanceToListener;
+    FHitInfo listenerHitInfo;
+    CastRayIntoScene(listenerRay, listenerHitInfo, distanceToListener);
+    if (listenerHitInfo.wasHit == 0) // if the ray didnt hit anything between the source and the listener
+    {
+        AttenuateRayByDiffraction(listenerRay, originalRay, diffractionHitNormal);
+        listenerRay.distance = distanceToListener;
+        //listenerRay.pressure *= cosFactor;
+        ApplyTravellingMediumPropertiesToRay(listenerRay);
+        // ray ended close enough to the listener to count as non obstructed
+        // setting a few values for debugging purposes (for drawing the rays in the viewport)
+        listenerHitInfo.wasHit = 1;
+        listenerHitInfo.hitLocation = ListenerPosition;
+    }
+    else
+    {
+        listenerHitInfo.wasHit = 0;
+    }
+    SaveHitAndRay(listenerHitInfo, listenerRay);
+}
+
+bool IsListenerVisibleFrom(float3 fromLocation)
+{
+    float3 toListenerVector = ListenerPosition.xyz - fromLocation;
+    float distance = length(toListenerVector);
+    FRay listenerRay =
+    {
+        0,
+        fromLocation,
+        toListenerVector / distance,
+        0.25f, 0.25f, 0.25f, 0.25f,
+        distance,
+        distance
+    };
+    FHitInfo listenerHitInfo;
+    CastRayIntoScene(listenerRay, listenerHitInfo, distance + 0.001);
+    return listenerHitInfo.wasHit == 0;
+}
+
+[numthreads(8,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    FSurfaceProperties currMed =
+    {
+        1.0f,
+        1.0f,
+        1.0f,
+        1.0f,
+        0.0f,
+        343.0f,
+        0,
+    };
+    currentMedium = currMed;
+    uint numSources;
+    
+    uint stride;
+    maxRays = (MaxBounces + 1) * (
+    DrawAllRays + // bounce ray
+    1 // listener ray
+    );
+    threadStartIndex = id.x * maxRays;
+    uint state = Time * 9581235 + id.x * 5123574;
+    AudioSources.GetDimensions(numSources, stride);
+    FAudioSource audioSource = AudioSources[id.x % numSources];
+    
+    // clear ray buffers
+    for (int i = 0; i < maxRays; i++)
+    {
+        // normal ray
+        FRay newRay = { 0, float3(0.0, 0.0, 0.0), float3(1.0, 0.0, 0.0), 
+            1.0f / NumRays * 0.25f, 
+            1.0f / NumRays * 0.25f,
+            1.0f / NumRays * 0.25f,
+            1.0f / NumRays * 0.25f,
+         0.0f, 0.0f };
+        GeneratedRays[threadStartIndex + i] = newRay;
+        FHitInfo newHitInfo =
+        {
+            false,
+            float3(0.0, 0.0, 0.0),
+            float3(0.0, 0.0, 0.0),
+            0,
+            0
+        };
+        newHitInfo.wasHit = false;
+        FinalHits[threadStartIndex + i] = newHitInfo;
+    }
+    
+    FRay ray = GenerateRandomRayFromAudioSource(audioSource, state);
+    FHitInfo finalHit;
+    
+    for (int b = 0; b < MaxBounces; b++)
+    {
+        // find the closest hit
+        if ((ray.pressure0 + ray.pressure1 + ray.pressure2 + ray.pressure3) * NumRays < 0.01f)
+        {
+            break;
+        }
+        FRay oldRay = ray;
+        FHitInfo closestHit;
+        CastRayIntoScene(ray, closestHit, -1, useDiffraction == 0);
+        FRay hitRay = ray;
+        if (closestHit.wasHit)
+        {
+            ApplyTravellingMediumPropertiesToRay(ray);
+            if (closestHit.hitObjectType == 1)
+            {
+                if (b != MaxBounces)
+                {
+                    if (useDiffraction == 1)
+                    {
+                        if (!IsListenerVisibleFrom(ray.origin))
+                        {
+                            CheckListenerFromDiffraction(ray, closestHit.hitLocation, closestHit.hitNormal);
+                        }
+                        ray = GetDiffractionRayFromHit(closestHit, ray, state);
+                    }
+                    currentMedium.isDiffractionVolume = true;
+                }
+            }
+            else if (closestHit.hitObjectType == 0)
+            {
+                FSurfaceProperties hitSurfaceProperties = BoxCollisions[closestHit.hitObjectId].properties;
+                if (hitSurfaceProperties.isDiffractionVolume == 0)
+                {
+                    ApplySurfacePropertiesToRay(ray, closestHit);
+                }
+                if (b != MaxBounces)
+                {
+                    /*if (GetRandomValue(state) < BoxCollisions[closestHit.hitObjectId].properties.roughness)
+                    {
+                        // diffuse reflection
+                        ray.origin = closestHit.hitLocation + closestHit.hitNormal * 0.00001f;
+                        ray.direction = GetRandomVectorOnHemisphere(closestHit.hitNormal, state);
+                    }
+                    else
+                    {
+                        // specular reflection
+                        ray = GetReflectionRayFromHit(closestHit, ray, 0.0f, state);
+                    }*/
+                    if (hitSurfaceProperties.isDiffractionVolume && useDiffraction == 1)
+                    {
+                        if (!IsListenerVisibleFrom(ray.origin))
+                        {
+                            CheckListenerFromDiffraction(ray, closestHit.hitLocation, closestHit.hitNormal);
+                        }
+                        ray = GetDiffractionRayFromHit(closestHit, ray, state);
+                    }
+                    else
+                    {
+                        CheckListenerFromHit(closestHit, ray, id.x, b);
+                        ray = GetReflectionRayFromHit(closestHit, ray, hitSurfaceProperties.roughness, state);
+                    }
+                    currentMedium = hitSurfaceProperties;
+                }
+            }
+            finalHit = closestHit;
+            if (DrawAllRays == 1)
+            {
+                SaveHitAndRay(finalHit, hitRay);
+            }
+        }
+        else
+        {
+            // handle non hit somehow, but for now we break
+            break;
+        }
+    }
+
+    if (id.x == 0)
+    {
+        FRay directRay =
+        {
+            1,
+            audioSource.location,
+            normalize(ListenerPosition.xyz - audioSource.location),
+        
+                0.25f * 3,
+                0.25f * 3,
+                0.25f * 3,
+                0.25f * 3,  
+            0,
+            0
+        };
+        CheckListenerFromPoint(audioSource.location, directRay);
+    }
+    //GeneratedRays[id.x] = ray;
+    //FinalHits[id.x] = finalHit;
+    //Result[id.xy] = float4(id.x & id.y, (id.x & 15)/15.0, (id.y & 15)/15.0, 0.0);
+}
