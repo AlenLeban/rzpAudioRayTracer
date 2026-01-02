@@ -17,14 +17,23 @@ using static UnityEditor.Experimental.AssetDatabaseExperimental.AssetDatabaseCou
 
 public class CSCoreTest : MonoBehaviour
 {
+    [SerializeField] private AudioRayTracer audioRayTracerRef;
     public static bool isIREnabled = false;
-    public static float[] IR0 = new float[AudioRayTracer.IRLength];
-    public static float[] IR1 = new float[AudioRayTracer.IRLength];
-    public static float[] IR2 = new float[AudioRayTracer.IRLength];
-    public static float[] IR3 = new float[AudioRayTracer.IRLength];
+    public static float[] IR0;
+    public static float[] IR1;
+    public static float[] IR2;
+    public static float[] IR3;
     public static Complex[][] IR0FFTLeft;
     public static Complex[][] IR0FFTRight;
     public const int IRChunkSize = 2048*2;
+
+    private void Awake()
+    {
+        IR0 = new float[audioRayTracerRef.IRLength];
+        IR1 = new float[audioRayTracerRef.IRLength];
+        IR2 = new float[audioRayTracerRef.IRLength];
+        IR3 = new float[audioRayTracerRef.IRLength];
+    }
 
     public void SetIRFromHistogram(float[][] IRHistogramLeft, float[][] IRHistogramRight)
     {
@@ -387,7 +396,7 @@ public class CSCoreTest : MonoBehaviour
         Debug.Log(_waveSource.WaveFormat.ExtraSize);
 
         _soundOut = new WaveOut(100);
-        ConvolveEffSource ces = new ConvolveEffSource(_waveSource.ToSampleSource(), 4800*2);
+        ConvolveEffSource ces = new ConvolveEffSource(_waveSource.ToSampleSource(), 4800*2, audioRayTracerRef.IRLength);
         
 
         IWaveSource wave = ces.ToWaveSource();
@@ -431,13 +440,15 @@ public class ConvolveEffSource : ISampleSource
     private int overlapAmount = 0;
     private WaveFormat finalFormat = new WaveFormat(44100, 32, 2, AudioEncoding.IeeeFloat, 0);
     private HighpassFilter hpf = new HighpassFilter(44100, 1000);
+    private int IRLength;
 
-    public ConvolveEffSource(ISampleSource source, int bufferSize)
+    public ConvolveEffSource(ISampleSource source, int bufferSize, int IRLength)
     {
         _source = source;
         _buffer = new float[bufferSize];
         _ir = new float[CSCoreTest.IR0.Length];
         _ir[0] = 1.0f;
+        this.IRLength = IRLength;
         _overlapBuffer0 = new float[CSCoreTest.IR0.Length * 3];
         _overlapBuffer1 = new float[CSCoreTest.IR0.Length * 3];
         b0 = new float[4410];
@@ -470,8 +481,8 @@ public class ConvolveEffSource : ISampleSource
         float[] result1;
         if (CSCoreTest.isIREnabled)
         {
-            result0 = CSCoreTest.ConvolveByChunks(b0, CSCoreTest.IR0FFTLeft, AudioRayTracer.IRLength, out counter);
-            result1 = CSCoreTest.ConvolveByChunks(b1, CSCoreTest.IR0FFTRight, AudioRayTracer.IRLength, out counter);
+            result0 = CSCoreTest.ConvolveByChunks(b0, CSCoreTest.IR0FFTLeft, this.IRLength, out counter);
+            result1 = CSCoreTest.ConvolveByChunks(b1, CSCoreTest.IR0FFTRight, this.IRLength, out counter);
         }
         else
         {
@@ -499,7 +510,7 @@ public class ConvolveEffSource : ISampleSource
         return samples;
     }
 }
-
+/*
 public class ArrayWaveSource : ISampleSource
 {
     private readonly float[] _data;
@@ -529,8 +540,8 @@ public class ArrayWaveSource : ISampleSource
     public long Length => _data.Length;
     public void Dispose() { }
 }
-
-public class DelayEffect : ISampleSource
+*/
+/*public class DelayEffect : ISampleSource
 {
     private float[] _delayBuffer;
     private int _delayBufferIndex = 0;
@@ -571,8 +582,8 @@ public class DelayEffect : ISampleSource
         _delayBufferIndex = (_delayBufferIndex + samplesRead) % _delayBuffer.Length;
         return samplesRead;
     }
-}
-
+}*/
+/*
 public class EchoEffect : ISampleSource
 {
     private readonly ISampleSource _source;
@@ -620,8 +631,8 @@ public class EchoEffect : ISampleSource
     public long Position { get => _source.Position; set => _source.Position = value; }
     public long Length => _source.Length;
     public void Dispose() => _source.Dispose();
-}
-
+}*/
+/*
 public class FeedbackEchoEffect : ISampleSource
 {
     private readonly ISampleSource _source;
@@ -747,4 +758,4 @@ public class ConvolutionEffect : ISampleSource
     public long Position { get => _source.Position; set => _source.Position = value; }
     public long Length => _source.Length;
     public void Dispose() => _source.Dispose();
-}
+}*/

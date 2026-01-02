@@ -64,7 +64,7 @@ public struct FAudioSource
 
 public class AudioRayTracer : MonoBehaviour
 {
-    [SerializeField] public static int IRLength = 44100;
+    [SerializeField] public int IRLength = 44100;
     // Start is called once before the first execution of Update after the MonoBehaviour is created
 
     [SerializeField] private UI uiObject;
@@ -368,7 +368,7 @@ public class AudioRayTracer : MonoBehaviour
                 }
                 if (ray.debugId == 1)
                 {
-                    float t = (ray.totalDistance / 343.0f * 44100);
+                    float t = (ray.totalDistance / 343.0f * IRLength);
                     int col = Math.Clamp((int)t, 0, IRHistogramLeft[0].Length - 2);
                     if (col == IRHistogramLeft[0].Length - 2)
                     {
