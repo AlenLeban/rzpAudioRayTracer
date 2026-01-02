@@ -42,4 +42,6 @@ In the Hierarchy window, there's an **AudioRayTracer** gameobject, holding the A
 
 https://github.com/user-attachments/assets/e39bc290-ba82-4a1b-90d0-b49246730342
 
+https://github.com/user-attachments/assets/ab0a4ae7-b52d-4d1d-a017-107fd2c125ab
+
 
